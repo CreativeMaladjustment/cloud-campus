@@ -24,6 +24,7 @@ jobs:
           install-awslocal: 'true'
         env:
           LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_CI_TOKEN }}
+          LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: "1"
 
       - name: Deploy CloudFormation template
         run: |
