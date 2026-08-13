@@ -2,6 +2,11 @@ name: Test S3 CloudFormation Deployment
 
 on:
   push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/test-s3-localstack.yaml'
+      - 'templates/s3-bucket.yaml'
   pull_request:
 
 jobs:
