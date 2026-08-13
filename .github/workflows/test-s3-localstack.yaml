@@ -12,8 +12,7 @@ on:
 jobs:
   test-s3-localstack:
     runs-on: ubuntu-latest
-    env:
-      LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: "1"
+    environment: localstack
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -23,6 +22,8 @@ jobs:
         with:
           image-tag: 'latest'
           install-awslocal: 'true'
+        env:
+          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_CI_TOKEN }}
 
       - name: Deploy CloudFormation template
         run: |
