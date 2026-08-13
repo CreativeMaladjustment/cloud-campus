@@ -1,0 +1,63 @@
+name: Test S3 CloudFormation Deployment
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/test-s3-localstack.yaml'
+      - 'templates/s3-bucket.yaml'
+  pull_request:
+
+jobs:
+  test-s3-localstack:
+    runs-on: ubuntu-latest
+    environment: localstack
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Cache LocalStack Docker image
+        id: localstack-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/localstack-image.tar
+          key: localstack-latest-${{ runner.os }}
+
+      - name: Load LocalStack image
+        if: steps.localstack-cache.outputs.cache-hit == 'true'
+        run: docker load -i /tmp/localstack-image.tar || true
+
+      - name: Setup LocalStack
+        uses: LocalStack/setup-localstack@v0.3.2
+        with:
+          image-tag: 'latest'
+          install-awslocal: 'true'
+          skip-pull: ${{ steps.localstack-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
+        env:
+          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_CI_TOKEN }}
+          LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: "1"
+
+      - name: Save LocalStack image
+        if: steps.localstack-cache.outputs.cache-hit != 'true'
+        run: docker save localstack/localstack-pro:latest -o /tmp/localstack-image.tar || docker save localstack/localstack:latest -o /tmp/localstack-image.tar || true
+
+      - name: Deploy CloudFormation template
+        run: |
+          awslocal cloudformation deploy \
+            --stack-name test-s3-stack \
+            --template-file templates/s3-bucket.yaml
+
+      - name: Validate deployment
+        run: |
+          echo "Listing buckets:"
+          awslocal s3 ls
+
+          echo "Confirming the new S3 bucket exists:"
+          awslocal s3api list-buckets | grep "my-localstack-test-bucket"
