@@ -15,6 +15,7 @@ jobs:
         uses: LocalStack/setup-localstack@main
         with:
           image-tag: 'latest'
+          use-pro: 'false'
 
       - name: Deploy CloudFormation template
         run: |
