@@ -12,10 +12,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup LocalStack
-        uses: LocalStack/setup-localstack@main
+        uses: LocalStack/setup-localstack@v0.3.2
         with:
           image-tag: 'latest'
           install-awslocal: 'true'
+        env:
+          LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: 1
 
       - name: Deploy CloudFormation template
         run: |
