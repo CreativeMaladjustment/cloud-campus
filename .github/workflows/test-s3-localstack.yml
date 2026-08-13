@@ -1,0 +1,31 @@
+name: Test S3 CloudFormation Deployment
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-s3-localstack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup LocalStack
+        uses: LocalStack/setup-localstack@main
+        with:
+          image-tag: 'latest'
+
+      - name: Deploy CloudFormation template
+        run: |
+          awslocal cloudformation deploy \
+            --stack-name test-s3-stack \
+            --template-file templates/s3-bucket.yaml
+
+      - name: Validate deployment
+        run: |
+          echo "Listing buckets:"
+          awslocal s3 ls
+
+          echo "Confirming the new S3 bucket exists:"
+          awslocal s3api list-buckets | grep "my-localstack-test-bucket"
