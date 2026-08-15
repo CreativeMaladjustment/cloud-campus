@@ -5,3 +5,27 @@ Resources:
     Properties:
       BucketName: my-localstack-test-bucket
       AccessControl: Private
+      LifecycleConfiguration:
+        Rules:
+          - Id: MoveToGlacier
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+          - Id: DeepArchiveImmediately
+            Status: Enabled
+            Prefix: archive/
+            Transitions:
+              - TransitionInDays: 0
+                StorageClass: DEEP_ARCHIVE
+
+  EphemeralS3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: my-localstack-ephemeral-bucket
+      AccessControl: Private
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteAfter30Days
+            Status: Enabled
+            ExpirationInDays: 30
