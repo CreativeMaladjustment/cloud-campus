@@ -61,3 +61,4 @@ jobs:
 
           echo "Confirming the new S3 bucket exists:"
           awslocal s3api list-buckets | grep "my-localstack-test-bucket"
+          awslocal s3api list-buckets | grep "my-localstack-ephemeral-bucket"
