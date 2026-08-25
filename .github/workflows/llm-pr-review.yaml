@@ -1,0 +1,130 @@
+name: LLM PR Review
+
+on:
+  pull_request:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      pr_url:
+        description: 'URL of the PR to review (optional if running on a PR)'
+        required: false
+        type: string
+      model:
+        description: 'The LLM model to use for review'
+        required: true
+        default: 'qwen2.5-coder:1.5b'
+        type: choice
+        options:
+          - 'qwen2.5-coder:1.5b'
+          - 'deepseek-r1:1.5b'
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    services:
+      ollama:
+        image: ollama/ollama@sha256:57d60e686821ea81a7748a3ec8141308c8b8f95b27105713954abf7a6529e700
+        ports:
+          - 11434:11434
+    permissions:
+      pull-requests: write
+      contents: read
+    env:
+      MODEL: ${{ github.event.inputs.model || 'qwen2.5-coder:1.5b' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Pull LLM Model
+        run: |
+          docker exec ${{ job.services.ollama.id }} ollama pull $MODEL
+
+      - name: Get PR Info and Diff
+        id: get_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_PR_URL: ${{ github.event.inputs.pr_url }}
+          EVENT_PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          PR_URL="$INPUT_PR_URL"
+          if [ -z "$PR_URL" ]; then
+            PR_URL="$EVENT_PR_URL"
+          fi
+
+          if [ -z "$PR_URL" ]; then
+            echo "No PR URL provided or found in event."
+            exit 1
+          fi
+
+          echo "PR_URL=$PR_URL" >> $GITHUB_ENV
+
+          gh pr view "$PR_URL" --json title,body > pr_info.json
+          gh pr diff "$PR_URL" > pr_diff.txt
+
+      - name: Generate Review with Ollama
+        run: |
+          cat << 'EOF' > review.py
+          import json
+          import urllib.request
+          import sys
+          import os
+          import re
+
+          def main():
+              with open('pr_info.json', 'r') as f:
+                  pr_info = json.load(f)
+
+              with open('pr_diff.txt', 'r') as f:
+                  pr_diff = f.read()
+
+              prompt = f"""You are a helpful software engineer performing a code review.
+          Please review the following Pull Request.
+
+          Title: {pr_info.get('title', '')}
+
+          Description: {pr_info.get('body', '')}
+
+          Code Diff:
+          {pr_diff}
+
+          Please check the PR title and description for clarity and completeness.
+          Also, check documentation formatting and accuracy based on what is in the PR.
+          Provide clear and concise actionable feedback."""
+
+              print("Sending prompt to Ollama...")
+
+              model_name = os.environ.get('MODEL', 'qwen2.5-coder:1.5b')
+
+              data = json.dumps({
+                  "model": model_name,
+                  "prompt": prompt,
+                  "stream": False
+              }).encode('utf-8')
+
+              req = urllib.request.Request('http://localhost:11434/api/generate', data=data, headers={'Content-Type': 'application/json'})
+
+              try:
+                  with urllib.request.urlopen(req) as response:
+                      result = json.loads(response.read().decode('utf-8'))
+                      output = result.get('response', '')
+
+                      # Clean up think/reasoning blocks
+                      output = re.sub(r'<think>.*?</think>', '', output, flags=re.DOTALL).strip()
+
+                      with open('review_comment.txt', 'w') as f:
+                          f.write(output)
+                      print("Review generated successfully.")
+              except Exception as e:
+                  print(f"Error running Ollama via REST API: {e}", file=sys.stderr)
+                  sys.exit(1)
+
+          if __name__ == '__main__':
+              main()
+          EOF
+          python3 review.py
+
+      - name: Comment on PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment "$PR_URL" --body-file review_comment.txt
