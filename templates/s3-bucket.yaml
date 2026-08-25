@@ -4,7 +4,11 @@ Resources:
     Type: 'AWS::S3::Bucket'
     Properties:
       BucketName: my-localstack-test-bucket
-      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
       LifecycleConfiguration:
         Rules:
           - Id: MoveToGlacier
@@ -23,7 +27,11 @@ Resources:
     Type: 'AWS::S3::Bucket'
     Properties:
       BucketName: my-localstack-ephemeral-bucket
-      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
       LifecycleConfiguration:
         Rules:
           - Id: DeleteAfter30Days
