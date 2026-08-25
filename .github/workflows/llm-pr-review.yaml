@@ -1,0 +1,108 @@
+name: LLM PR Review
+
+on:
+  pull_request:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      pr_url:
+        description: 'URL of the PR to review (optional if running on a PR)'
+        required: false
+        type: string
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | bash
+          ollama serve > ollama.log 2>&1 &
+
+      - name: Pull LLM Model
+        run: |
+          # Wait for Ollama server to start
+          sleep 5
+          ollama pull llama3.2
+
+      - name: Get PR Info and Diff
+        id: get_pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_URL="${{ github.event.inputs.pr_url }}"
+          if [ -z "$PR_URL" ]; then
+            PR_URL="${{ github.event.pull_request.html_url }}"
+          fi
+
+          if [ -z "$PR_URL" ]; then
+            echo "No PR URL provided or found in event."
+            exit 1
+          fi
+
+          echo "PR_URL=$PR_URL" >> $GITHUB_ENV
+
+          gh pr view "$PR_URL" --json title,body > pr_info.json
+          gh pr diff "$PR_URL" > pr_diff.txt
+
+      - name: Generate Review with Ollama
+        run: |
+          cat << 'EOF' > review.py
+          import json
+          import subprocess
+          import sys
+
+          def main():
+              with open('pr_info.json', 'r') as f:
+                  pr_info = json.load(f)
+
+              with open('pr_diff.txt', 'r') as f:
+                  pr_diff = f.read()
+
+              prompt = f"""You are a helpful software engineer performing a code review.
+          Please review the following Pull Request.
+
+          Title: {pr_info.get('title', '')}
+
+          Description: {pr_info.get('body', '')}
+
+          Code Diff:
+          {pr_diff}
+
+          Please check the PR title and description for clarity and completeness.
+          Also, check documentation formatting and accuracy based on what is in the PR.
+          Provide clear and concise actionable feedback."""
+
+              print("Sending prompt to Ollama...")
+              try:
+                  result = subprocess.run(
+                      ['ollama', 'run', 'llama3.2'],
+                      input=prompt,
+                      text=True,
+                      capture_output=True,
+                      check=True
+                  )
+
+                  with open('review_comment.txt', 'w') as f:
+                      f.write(result.stdout)
+                  print("Review generated successfully.")
+              except subprocess.CalledProcessError as e:
+                  print(f"Error running Ollama: {e.stderr}", file=sys.stderr)
+                  sys.exit(1)
+
+          if __name__ == '__main__':
+              main()
+          EOF
+          python3 review.py
+
+      - name: Comment on PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment "$PR_URL" --body-file review_comment.txt
