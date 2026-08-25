@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/test-s3-localstack.yaml'
       - 'templates/s3-bucket.yaml'
+      - 'templates/main.tf'
   pull_request:
 
 jobs:
@@ -39,7 +40,6 @@ jobs:
         with:
           image-tag: 'latest'
           install-awslocal: 'true'
-          skip-pull: ${{ steps.localstack-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
         env:
           LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_CI_TOKEN }}
           LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: "1"
@@ -48,11 +48,23 @@ jobs:
         if: steps.localstack-cache.outputs.cache-hit != 'true'
         run: docker save localstack/localstack-pro:latest -o /tmp/localstack-image.tar || docker save localstack/localstack:latest -o /tmp/localstack-image.tar || true
 
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+
+      - name: Install tflocal
+        run: pip install terraform-local
+
       - name: Deploy CloudFormation template
         run: |
           awslocal cloudformation deploy \
             --stack-name test-s3-stack \
             --template-file templates/s3-bucket.yaml
+
+      - name: Deploy Terraform template
+        run: |
+          cd templates
+          tflocal init
+          tflocal apply -auto-approve
 
       - name: Validate deployment
         run: |
@@ -62,3 +74,4 @@ jobs:
           echo "Confirming the new S3 bucket exists:"
           awslocal s3api list-buckets | grep "my-localstack-test-bucket"
           awslocal s3api list-buckets | grep "my-localstack-ephemeral-bucket"
+          awslocal s3api list-buckets | grep "my-tf-test-bucket"
