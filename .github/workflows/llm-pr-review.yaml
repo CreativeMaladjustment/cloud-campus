@@ -33,7 +33,7 @@ jobs:
       MODEL: ${{ github.event.inputs.model || 'qwen2.5-coder:1.5b' }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Pull LLM Model
         run: |
