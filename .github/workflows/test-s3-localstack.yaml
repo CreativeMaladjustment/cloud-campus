@@ -50,7 +50,7 @@ jobs:
         run: docker save localstack/localstack-pro:latest -o /tmp/localstack-image.tar || docker save localstack/localstack:latest -o /tmp/localstack-image.tar || true
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
 
       - name: Install tflocal
         run: pip install terraform-local
