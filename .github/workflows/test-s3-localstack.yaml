@@ -40,7 +40,6 @@ jobs:
         with:
           image-tag: 'latest'
           install-awslocal: 'true'
-          skip-pull: ${{ steps.localstack-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
         env:
           LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_CI_TOKEN }}
           LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: "1"
