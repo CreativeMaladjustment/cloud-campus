@@ -9,36 +9,46 @@ on:
         description: 'URL of the PR to review (optional if running on a PR)'
         required: false
         type: string
+      model:
+        description: 'The LLM model to use for review'
+        required: true
+        default: 'qwen2.5-coder:1.5b'
+        type: choice
+        options:
+          - 'qwen2.5-coder:1.5b'
+          - 'deepseek-r1:1.5b'
 
 jobs:
   review:
     runs-on: ubuntu-latest
+    services:
+      ollama:
+        image: ollama/ollama:latest
+        ports:
+          - 11434:11434
     permissions:
       pull-requests: write
       contents: read
+    env:
+      MODEL: ${{ github.event.inputs.model || 'qwen2.5-coder:1.5b' }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Install Ollama
-        run: |
-          curl -fsSL https://ollama.com/install.sh | bash
-          ollama serve > ollama.log 2>&1 &
+        uses: actions/checkout@v4
 
       - name: Pull LLM Model
         run: |
-          # Wait for Ollama server to start
-          sleep 5
-          ollama pull llama3.2
+          docker exec ${{ job.services.ollama.id }} ollama pull $MODEL
 
       - name: Get PR Info and Diff
         id: get_pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_PR_URL: ${{ github.event.inputs.pr_url }}
+          EVENT_PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
-          PR_URL="${{ github.event.inputs.pr_url }}"
+          PR_URL="$INPUT_PR_URL"
           if [ -z "$PR_URL" ]; then
-            PR_URL="${{ github.event.pull_request.html_url }}"
+            PR_URL="$EVENT_PR_URL"
           fi
 
           if [ -z "$PR_URL" ]; then
@@ -55,8 +65,10 @@ jobs:
         run: |
           cat << 'EOF' > review.py
           import json
-          import subprocess
+          import urllib.request
           import sys
+          import os
+          import re
 
           def main():
               with open('pr_info.json', 'r') as f:
@@ -80,20 +92,30 @@ jobs:
           Provide clear and concise actionable feedback."""
 
               print("Sending prompt to Ollama...")
-              try:
-                  result = subprocess.run(
-                      ['ollama', 'run', 'llama3.2'],
-                      input=prompt,
-                      text=True,
-                      capture_output=True,
-                      check=True
-                  )
 
-                  with open('review_comment.txt', 'w') as f:
-                      f.write(result.stdout)
-                  print("Review generated successfully.")
-              except subprocess.CalledProcessError as e:
-                  print(f"Error running Ollama: {e.stderr}", file=sys.stderr)
+              model_name = os.environ.get('MODEL', 'qwen2.5-coder:1.5b')
+
+              data = json.dumps({
+                  "model": model_name,
+                  "prompt": prompt,
+                  "stream": False
+              }).encode('utf-8')
+
+              req = urllib.request.Request('http://localhost:11434/api/generate', data=data, headers={'Content-Type': 'application/json'})
+
+              try:
+                  with urllib.request.urlopen(req) as response:
+                      result = json.loads(response.read().decode('utf-8'))
+                      output = result.get('response', '')
+
+                      # Clean up think/reasoning blocks
+                      output = re.sub(r'<think>.*?</think>', '', output, flags=re.DOTALL).strip()
+
+                      with open('review_comment.txt', 'w') as f:
+                          f.write(output)
+                      print("Review generated successfully.")
+              except Exception as e:
+                  print(f"Error running Ollama via REST API: {e}", file=sys.stderr)
                   sys.exit(1)
 
           if __name__ == '__main__':
