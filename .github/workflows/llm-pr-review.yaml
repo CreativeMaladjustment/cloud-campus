@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       ollama:
-        image: ollama/ollama:latest
+        image: ollama/ollama@sha256:57d60e686821ea81a7748a3ec8141308c8b8f95b27105713954abf7a6529e700
         ports:
           - 11434:11434
     permissions:
