@@ -1,0 +1,190 @@
+name: LocalStack Cloudflare Tunnel Demo
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  tunnel:
+    name: Deploy Lambda on LocalStack and expose it via Cloudflare Quick Tunnel
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Start LocalStack
+        run: |
+          set -euo pipefail
+          docker run -d \
+            --name localstack \
+            -p 4566:4566 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e DOCKER_HOST=unix:///var/run/docker.sock \
+            -e DEBUG=1 \
+            localstack/localstack:latest
+
+      - name: Wait for LocalStack to be healthy
+        run: |
+          set -euo pipefail
+          echo "Polling http://localhost:4566/_localstack/health ..."
+          for i in $(seq 1 60); do
+            STATUS=$(curl -sf http://localhost:4566/_localstack/health | jq -r '.services.lambda // "unknown"' 2>/dev/null || echo "unreachable")
+            if [ "$STATUS" = "available" ] || [ "$STATUS" = "running" ]; then
+              echo "LocalStack is healthy (lambda: $STATUS) after $i attempt(s)."
+              exit 0
+            fi
+            echo "  attempt $i/60: lambda service status = $STATUS, retrying..."
+            sleep 5
+          done
+          echo "::error::LocalStack did not become healthy in time"
+          docker logs localstack || true
+          exit 1
+
+      - name: Install awscli-local
+        run: pip install "awscli-local[ver1]"
+
+      - name: Create Lambda deployment package
+        run: |
+          set -euo pipefail
+          cat > lambda_function.py <<'EOF'
+          def lambda_handler(event, context):
+              return {
+                  "statusCode": 200,
+                  "headers": {"Content-Type": "text/html"},
+                  "body": "<h1>Hello from LocalStack via Cloudflare Tunnel!</h1>",
+              }
+          EOF
+          zip function.zip lambda_function.py
+
+      - name: Deploy hello-world Lambda function
+        run: |
+          set -euo pipefail
+          awslocal lambda create-function \
+            --function-name hello-world \
+            --runtime python3.11 \
+            --handler lambda_function.lambda_handler \
+            --zip-file fileb://function.zip \
+            --role arn:aws:iam::000000000000:role/lambda-role
+          awslocal lambda wait function-active --function-name hello-world
+          echo "Lambda function 'hello-world' is active."
+
+      - name: Create public Function URL
+        run: |
+          set -euo pipefail
+          awslocal lambda create-function-url-config \
+            --function-name hello-world \
+            --auth-type NONE
+
+          awslocal lambda add-permission \
+            --function-name hello-world \
+            --statement-id FunctionURLAllowPublicAccess \
+            --action lambda:InvokeFunctionUrl \
+            --principal "*" \
+            --function-url-auth-type NONE
+
+          FUNCTION_URL=$(awslocal lambda get-function-url-config \
+            --function-name hello-world \
+            --query 'FunctionUrl' --output text)
+          LAMBDA_HOST=$(echo "$FUNCTION_URL" | sed -E 's#^https?://##; s#/$##')
+
+          echo "FUNCTION_URL=$FUNCTION_URL" >> "$GITHUB_ENV"
+          echo "LAMBDA_HOST=$LAMBDA_HOST" >> "$GITHUB_ENV"
+          echo "Function URL: $FUNCTION_URL"
+          echo "Lambda host:  $LAMBDA_HOST"
+
+      - name: Sanity-check the function locally (Host header routing)
+        run: |
+          set -euo pipefail
+          curl -sf -H "Host: $LAMBDA_HOST" http://localhost:4566/ | tee /tmp/local-check.html
+          grep -q "Hello from LocalStack" /tmp/local-check.html
+
+      - name: Install cloudflared
+        run: |
+          set -euo pipefail
+          curl -L --output cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          ./cloudflared --version
+
+      - name: Start Cloudflare Quick Tunnel
+        run: |
+          set -euo pipefail
+          # CRITICAL: LocalStack's gateway routes Lambda Function URL requests by
+          # the incoming HTTP Host header, not by path. cloudflared proxies the
+          # public *.trycloudflare.com traffic to http://localhost:4566, but
+          # without --http-host-header it would forward the tunnel's own
+          # trycloudflare.com Host header, which LocalStack wouldn't recognize
+          # as any function. Rewriting the Host header to the Lambda's own
+          # lambda-url.*.localhost.localstack.cloud domain makes LocalStack
+          # route every request straight to the hello-world function.
+          ./cloudflared tunnel --no-autoupdate --url http://localhost:4566 \
+            --http-host-header "$LAMBDA_HOST" \
+            > cloudflared.log 2>&1 &
+          echo $! > cloudflared.pid
+
+          echo "Waiting for the Cloudflare Quick Tunnel URL to be assigned..."
+          TUNNEL_URL=""
+          for i in $(seq 1 30); do
+            TUNNEL_URL=$(grep -oE 'https://[A-Za-z0-9.-]+\.trycloudflare\.com' cloudflared.log | head -n1 || true)
+            if [ -n "$TUNNEL_URL" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "::error::Failed to obtain a Cloudflare tunnel URL"
+            cat cloudflared.log
+            exit 1
+          fi
+
+          echo "TUNNEL_URL=$TUNNEL_URL" >> "$GITHUB_ENV"
+
+      - name: Publish tunnel URL
+        run: |
+          {
+            echo "## 🌐 Cloudflare Quick Tunnel is live"
+            echo
+            echo "**Public URL:** $TUNNEL_URL"
+            echo
+            echo "Routed through LocalStack (\`http://localhost:4566\`) to the"
+            echo "\`hello-world\` Lambda Function URL host \`$LAMBDA_HOST\`"
+            echo "via \`cloudflared --http-host-header\`."
+            echo
+            echo "This tunnel stays up for 10 minutes from the start of this run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "=============================================================="
+          echo " 🌐 PUBLIC TUNNEL URL: $TUNNEL_URL"
+          echo "=============================================================="
+
+      - name: Hold tunnel open for 10 minutes
+        run: |
+          set -euo pipefail
+          echo "Tunnel URL: $TUNNEL_URL"
+          for minute in $(seq 1 10); do
+            echo "[$(date -u +%H:%M:%S)] Tunnel active — minute ${minute}/10. URL: $TUNNEL_URL"
+            sleep 60
+          done
+          echo "10-minute hold complete."
+
+      - name: Tear down tunnel and LocalStack
+        if: always()
+        run: |
+          if [ -f cloudflared.pid ]; then
+            PID=$(cat cloudflared.pid)
+            echo "Stopping cloudflared (pid $PID)..."
+            kill "$PID" 2>/dev/null || true
+            wait "$PID" 2>/dev/null || true
+          fi
+          docker stop localstack 2>/dev/null || true
+          docker rm localstack 2>/dev/null || true
+          echo "Teardown complete."
