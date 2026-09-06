@@ -124,7 +124,12 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          # Deliberately not env.PYTHON_VERSION: semgrep 1.99.0 pulls in an
+          # opentelemetry -> protobuf C-extension chain that isn't 3.14-ready
+          # yet (crashes at import time with "Metaclasses with custom tp_new
+          # are not supported"). Move this back to env.PYTHON_VERSION once
+          # semgrep/protobuf ship a 3.14-compatible release.
+          python-version: "3.13"
           cache: pip
 
       - name: Install semgrep
