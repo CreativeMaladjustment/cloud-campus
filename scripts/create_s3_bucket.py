@@ -9,35 +9,38 @@ import os
 
 import boto3
 
-ENDPOINT_URL = os.environ.get("AWS_ENDPOINT_URL", "http://localhost:4566")
-BUCKET_NAME = os.environ.get("BUCKET_NAME", "my-boto3-test-bucket")
-REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+DEFAULT_ENDPOINT_URL = "http://localhost:4566"
+DEFAULT_BUCKET_NAME = "my-boto3-test-bucket"
+DEFAULT_REGION = "us-east-1"
 
 
-def get_s3_client():
+def get_s3_client(endpoint_url: str = None, region: str = None):
     return boto3.client(
         "s3",
-        endpoint_url=ENDPOINT_URL,
-        region_name=REGION,
+        endpoint_url=endpoint_url or os.environ.get("AWS_ENDPOINT_URL", DEFAULT_ENDPOINT_URL),
+        region_name=region or os.environ.get("AWS_DEFAULT_REGION", DEFAULT_REGION),
         aws_access_key_id="test",
         aws_secret_access_key="test",
     )
 
 
-def create_bucket(s3_client, bucket_name: str):
-    if REGION == "us-east-1":
+def create_bucket(s3_client, bucket_name: str, region: str = DEFAULT_REGION):
+    if region == "us-east-1":
         s3_client.create_bucket(Bucket=bucket_name)
     else:
         s3_client.create_bucket(
             Bucket=bucket_name,
-            CreateBucketConfiguration={"LocationConstraint": REGION},
+            CreateBucketConfiguration={"LocationConstraint": region},
         )
     print(f"Created bucket: {bucket_name}")
 
 
 def main():
-    s3_client = get_s3_client()
-    create_bucket(s3_client, BUCKET_NAME)
+    region = os.environ.get("AWS_DEFAULT_REGION", DEFAULT_REGION)
+    bucket_name = os.environ.get("BUCKET_NAME", DEFAULT_BUCKET_NAME)
+
+    s3_client = get_s3_client(region=region)
+    create_bucket(s3_client, bucket_name, region=region)
 
     print("Current buckets:")
     for bucket in s3_client.list_buckets()["Buckets"]:

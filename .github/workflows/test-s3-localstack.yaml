@@ -10,6 +10,8 @@ on:
       - 'templates/main.tf'
       - 'scripts/create_s3_bucket.py'
       - 'requirements.txt'
+      - 'requirements-dev.txt'
+      - 'tests/integration/**'
   pull_request:
 
 jobs:
@@ -57,7 +59,7 @@ jobs:
         run: pip install terraform-local
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       - name: Deploy CloudFormation template
         run: |
@@ -73,6 +75,9 @@ jobs:
 
       - name: Create S3 bucket with boto3
         run: python scripts/create_s3_bucket.py
+
+      - name: Run boto3 integration tests against LocalStack
+        run: pytest tests/integration -v
 
       - name: Validate deployment
         run: |
