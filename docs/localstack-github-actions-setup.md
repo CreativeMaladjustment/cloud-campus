@@ -13,7 +13,7 @@ The workflow is triggered on pushes to the `main` branch (specifically when chan
 ### Steps
 
 1. **Checkout code:** Uses the standard GitHub `actions/checkout` to pull the repository into the runner.
-2. **Setup Python:** Uses `actions/setup-python` to ensure Python 3.13 is available and caches Python dependencies (`pip`) based on the `requirements.txt` file.
+2. **Setup Python:** Uses `actions/setup-python` to ensure Python 3.14 is available and caches Python dependencies (`pip`) based on the `requirements.txt` file.
 3. **Cache LocalStack Image:** Uses `actions/cache` to cache the LocalStack Docker image across runs to speed up the workflow execution.
 4. **Setup LocalStack:** Uses the official `LocalStack/setup-localstack` action. It sets up LocalStack and installs the `awslocal` CLI wrapper. It uses the `LOCALSTACK_CI_TOKEN` to authenticate pro features and the `LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT` environment variable to bypass the account requirement screen.
 5. **Install Python dependencies:** Installs `requirements-dev.txt` (which pulls in `boto3`, `awscli-local`, and `pytest`).
