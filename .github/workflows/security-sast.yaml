@@ -1,0 +1,363 @@
+name: "Security: SAST, dependencies & secrets"
+
+# PRs get a fast, diff-aware scan wherever a tool supports it (Semgrep
+# --baseline-commit, TruffleHog since-commit). No push-to-main trigger on
+# purpose: merging a PR already re-triggers this via the pull_request event's
+# `synchronize`/re-checks, so a separate push trigger just meant a second run
+# back-to-back at merge time. That does leave a gap for direct pushes to main
+# (if branch protection allows them) and for main drifting between merges —
+# the weekly cron below (and manual runs) is what covers that with a
+# full-codebase scan, so newly-published CVEs or rule updates still surface
+# on a regular cadence (see the `github.event_name == 'pull_request'` checks
+# inside the semgrep/secrets jobs).
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * 1" # Mondays 04:17 UTC — full-codebase deep scan
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  security-events: write # upload-sarif needs this (Code Scanning is free on public repos; private repos need GitHub Advanced Security)
+
+concurrency:
+  group: security-sast-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.14"
+
+  # ---------------------------------------------------------------------
+  # SEVERITY GATES — flip these to change what turns this workflow red.
+  # Every tool below still runs to completion and uploads its full results
+  # regardless of these values; they only control the final pass/fail step
+  # in each job. Tighten for a security-critical repo, loosen while you
+  # burn down a backlog of pre-existing findings.
+  # ---------------------------------------------------------------------
+  BANDIT_FAIL_SEVERITY: HIGH # LOW | MEDIUM | HIGH
+  SEMGREP_FAIL_SEVERITY: error # error | warning | note (Semgrep ERROR/WARNING/INFO -> SARIF error/warning/note)
+  PIP_AUDIT_IGNORE_VULNS: "" # space-separated CVE/GHSA/PYSEC ids to accept as known risk, once any exist
+  TRUFFLEHOG_FAIL_ON_VERIFIED: "true" # "true": only provider-confirmed live secrets fail CI. "false": also fail on unverified candidates.
+
+jobs:
+  bandit:
+    name: Bandit (Python SAST)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install bandit
+        run: pip install "bandit==1.8.3" "bandit-sarif-formatter==1.1.1"
+
+      - name: Run bandit
+        # `|| true`: never let the scan itself fail the step — every finding
+        # still lands in the SARIF/JSON output below. The dedicated gate
+        # step further down is what actually decides pass/fail, based on
+        # BANDIT_FAIL_SEVERITY above.
+        # `./tests` is excluded: `assert` is how pytest tests are meant to be
+        # written, so B101 (assert_used) there is just noise, not a finding —
+        # bandit still runs B101 against everything else (scripts/, etc.).
+        run: |
+          bandit -r . --exclude ./.git,./tests \
+            -f sarif -o bandit-results.sarif || true
+          bandit -r . --exclude ./.git,./tests \
+            -f json -o bandit-results.json || true
+
+      - name: Upload SARIF to Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        continue-on-error: true # don't break the build on private repos without GHAS
+        with:
+          sarif_file: bandit-results.sarif
+          category: bandit
+
+      - name: Upload raw results artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bandit-results
+          path: bandit-results.json
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Bandit (Python SAST)"
+            echo
+            jq -r '
+              def count($sev): [.results[] | select(.issue_severity == $sev)] | length;
+              "| Severity | Count |\n|---|---|\n| HIGH | " + (count("HIGH")|tostring) +
+              " |\n| MEDIUM | " + (count("MEDIUM")|tostring) +
+              " |\n| LOW | " + (count("LOW")|tostring) + " |"
+            ' bandit-results.json
+            echo
+            echo "Full findings: Code Scanning tab (category \`bandit\`) or the \`bandit-results\` artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce severity gate
+        run: |
+          # See BANDIT_FAIL_SEVERITY at the top of this file to change the
+          # threshold. Findings below it are still visible in Code Scanning
+          # and the job summary above — they just don't fail this job.
+          COUNT=$(jq --arg threshold "$BANDIT_FAIL_SEVERITY" '
+            def rank($s): {"LOW":1,"MEDIUM":2,"HIGH":3}[$s];
+            [.results[] | select(rank(.issue_severity) >= rank($threshold))] | length
+          ' bandit-results.json)
+          if [ "$COUNT" -gt 0 ]; then
+            echo "::error::Bandit found $COUNT finding(s) at or above severity '${BANDIT_FAIL_SEVERITY}'"
+            exit 1
+          fi
+
+  semgrep:
+    name: Semgrep (SAST — Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # needed so --baseline-commit can diff against the PR base
+
+      - uses: actions/setup-python@v7
+        with:
+          # Deliberately not env.PYTHON_VERSION: semgrep 1.99.0 pulls in an
+          # opentelemetry -> protobuf C-extension chain that isn't 3.14-ready
+          # yet (crashes at import time with "Metaclasses with custom tp_new
+          # are not supported"). Move this back to env.PYTHON_VERSION once
+          # semgrep/protobuf ship a 3.14-compatible release.
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install semgrep
+        # setuptools>=81 dropped the bundled pkg_resources shim, which one of
+        # semgrep's own transitive deps (opentelemetry-instrumentation) still
+        # imports at startup — without this pin, semgrep crashes before it
+        # even parses args (ModuleNotFoundError: No module named 'pkg_resources').
+        run: pip install "semgrep==1.99.0" "setuptools<81"
+
+      - name: Run semgrep
+        # Diff-aware on PRs (only reports findings introduced by the diff,
+        # via --baseline-commit) for speed; full-repo on schedule/
+        # workflow_dispatch so the weekly cron always covers everything.
+        run: |
+          BASELINE_ARGS=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASELINE_ARGS="--baseline-commit ${{ github.event.pull_request.base.sha }}"
+          fi
+          semgrep scan \
+            --config p/security-audit \
+            --config p/python \
+            $BASELINE_ARGS \
+            --sarif --output semgrep-results.sarif || true
+
+      - name: Upload SARIF to Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        continue-on-error: true
+        with:
+          sarif_file: semgrep-results.sarif
+          category: semgrep
+
+      - name: Upload raw results artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: semgrep-results
+          path: semgrep-results.sarif
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Semgrep (SAST)"
+            echo
+            jq -r '
+              [.runs[].results[]] as $r |
+              "Findings: **" + ($r | length | tostring) + "** " +
+              "(error: " + ([$r[] | select(.level=="error")] | length | tostring) +
+              ", warning: " + ([$r[] | select(.level=="warning")] | length | tostring) +
+              ", note: " + ([$r[] | select(.level=="note")] | length | tostring) + ")"
+            ' semgrep-results.sarif
+            echo
+            echo "Full findings: Code Scanning tab (category \`semgrep\`) or the \`semgrep-results\` artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce severity gate
+        run: |
+          # SEMGREP_FAIL_SEVERITY (top of file): "error" fails only on
+          # Semgrep ERROR-severity rules (SARIF level=error) — that's where
+          # most of the p/security-audit rules land.
+          # Set to "warning" or "note" to also fail on lower-severity hits.
+          LEVELS='["error"]'
+          case "$SEMGREP_FAIL_SEVERITY" in
+            warning) LEVELS='["error","warning"]' ;;
+            note) LEVELS='["error","warning","note"]' ;;
+          esac
+          COUNT=$(jq --argjson levels "$LEVELS" \
+            '[.runs[].results[] | select(.level as $l | $levels | index($l))] | length' \
+            semgrep-results.sarif)
+          if [ "$COUNT" -gt 0 ]; then
+            echo "::error::Semgrep found $COUNT finding(s) at or above the '${SEMGREP_FAIL_SEVERITY}' threshold"
+            exit 1
+          fi
+
+  pip-audit:
+    name: pip-audit (dependency vulnerabilities)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install pip-audit
+        run: pip install "pip-audit==2.9.0" # pin deliberately, like the other scanners — bump on purpose, not by drift
+
+      - name: Run pip-audit
+        # pip-audit's advisory sources (OSV/PyPA) don't consistently expose
+        # CVSS scores, so there's no clean HIGH/MEDIUM severity knob here —
+        # the practical lever is PIP_AUDIT_IGNORE_VULNS above (an allowlist
+        # of accepted-risk CVE/GHSA/PYSEC ids). Everything else fails CI.
+        run: |
+          IGNORE_ARGS=""
+          for id in $PIP_AUDIT_IGNORE_VULNS; do
+            IGNORE_ARGS="$IGNORE_ARGS --ignore-vuln $id"
+          done
+          set +e
+          pip-audit -r requirements.txt --format json --output pip-audit-results.json $IGNORE_ARGS
+          echo "PIP_AUDIT_EXIT=$?" >> "$GITHUB_ENV"
+          set -e
+          pip-audit -r requirements.txt --format markdown $IGNORE_ARGS > pip-audit-summary.md || true
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## pip-audit (dependency vulnerabilities)"
+            echo
+            cat pip-audit-summary.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload raw results artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pip-audit-results
+          path: pip-audit-results.json
+
+      - name: Enforce gate
+        run: |
+          if [ "${PIP_AUDIT_EXIT:-0}" -ne 0 ]; then
+            echo "::error::pip-audit found unresolved dependency vulnerabilities — see job summary / artifact"
+            exit 1
+          fi
+
+  secrets:
+    name: TruffleHog (secret detection)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history: secrets committed-then-deleted are still in past commits
+
+      - name: Install TruffleHog
+        # Pinned release binary + published checksum verification, instead of
+        # piping the `main`-branch install script into `sh` (that script can
+        # change without review between runs and isn't checksummed).
+        # TRUFFLEHOG_VERSION is a deliberate, reviewed bump — check
+        # https://github.com/trufflesecurity/trufflehog/releases for newer
+        # tags periodically; Dependabot doesn't track this kind of pin.
+        env:
+          TRUFFLEHOG_VERSION: "3.83.7"
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          BASE_URL="https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}"
+          curl -sSfLO "${BASE_URL}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz"
+          curl -sSfLO "${BASE_URL}/trufflehog_${TRUFFLEHOG_VERSION}_checksums.txt"
+          sha256sum --ignore-missing -c "trufflehog_${TRUFFLEHOG_VERSION}_checksums.txt"
+          tar -xzf "trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" trufflehog
+          sudo install -m 0755 trufflehog /usr/local/bin/trufflehog
+
+      - name: Run TruffleHog
+        # Diff scan on PRs (only commits introduced by this PR); full
+        # filesystem scan on schedule/workflow_dispatch, so the weekly
+        # cron always sweeps the whole repo history.
+        #
+        # --no-update: trufflehog otherwise checks for and installs a newer
+        # release on every invocation, which (a) defeats the pinned/verified
+        # install above and (b) fails outright here since the binary lives in
+        # a root-owned path it can't self-overwrite as the runner user.
+        run: |
+          set +e
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            trufflehog --no-update git file://. \
+              --since-commit="${{ github.event.pull_request.base.sha }}" \
+              --branch=HEAD \
+              --results=verified,unknown --json > trufflehog-results.jsonl
+          else
+            trufflehog --no-update filesystem . \
+              --results=verified,unknown --json > trufflehog-results.jsonl
+          fi
+
+      - name: Upload raw results artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: trufflehog-results
+          path: trufflehog-results.jsonl
+
+      - name: Job summary + severity gate
+        if: always()
+        run: |
+          # TRUFFLEHOG_FAIL_ON_VERIFIED (top of file): "true" fails only on
+          # provider-confirmed *live* secrets (TruffleHog actually verified
+          # the credential against the issuing service). "false" also fails
+          # on unverified candidates, which is noisier but catches things
+          # TruffleHog can't verify (e.g. offline-only secrets).
+          VERIFIED_COUNT=$(jq -s '[.[] | select(.Verified == true)] | length' trufflehog-results.jsonl 2>/dev/null || echo 0)
+          TOTAL_COUNT=$(jq -s 'length' trufflehog-results.jsonl 2>/dev/null || echo 0)
+          {
+            echo "## TruffleHog (secret detection)"
+            echo
+            echo "Verified secrets: **$VERIFIED_COUNT** · Total candidates: **$TOTAL_COUNT**"
+            echo
+            echo "Values are intentionally left out of this summary — check the"
+            echo "\`trufflehog-results\` artifact (JSONL) to triage a hit, then rotate"
+            echo "the credential before doing anything else."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$TRUFFLEHOG_FAIL_ON_VERIFIED" = "true" ]; then
+            [ "$VERIFIED_COUNT" -gt 0 ] && { echo "::error::TruffleHog found $VERIFIED_COUNT verified secret(s)"; exit 1; }
+          else
+            [ "$TOTAL_COUNT" -gt 0 ] && { echo "::error::TruffleHog found $TOTAL_COUNT candidate secret(s)"; exit 1; }
+          fi
+          exit 0
+
+  report:
+    name: Aggregate summary
+    needs: [bandit, semgrep, pip-audit, secrets]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Combined status
+        run: |
+          {
+            echo "# Security scan summary"
+            echo
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| Bandit (Python SAST) | ${{ needs.bandit.result }} |"
+            echo "| Semgrep (SAST) | ${{ needs.semgrep.result }} |"
+            echo "| pip-audit (dependencies) | ${{ needs['pip-audit'].result }} |"
+            echo "| TruffleHog (secrets) | ${{ needs.secrets.result }} |"
+            echo
+            echo "Per-tool detail is in each job's own summary above, and in the"
+            echo "Code Scanning tab for Bandit/Semgrep (SARIF-backed)."
+          } >> "$GITHUB_STEP_SUMMARY"
