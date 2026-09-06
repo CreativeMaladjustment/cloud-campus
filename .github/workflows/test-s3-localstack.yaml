@@ -8,6 +8,8 @@ on:
       - '.github/workflows/test-s3-localstack.yaml'
       - 'templates/s3-bucket.yaml'
       - 'templates/main.tf'
+      - 'scripts/create_s3_bucket.py'
+      - 'requirements.txt'
   pull_request:
 
 jobs:
@@ -54,6 +56,9 @@ jobs:
       - name: Install tflocal
         run: pip install terraform-local
 
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
       - name: Deploy CloudFormation template
         run: |
           awslocal cloudformation deploy \
@@ -66,6 +71,9 @@ jobs:
           tflocal init
           tflocal apply -auto-approve
 
+      - name: Create S3 bucket with boto3
+        run: python scripts/create_s3_bucket.py
+
       - name: Validate deployment
         run: |
           echo "Listing buckets:"
@@ -75,3 +83,4 @@ jobs:
           awslocal s3api list-buckets | grep "my-localstack-test-bucket"
           awslocal s3api list-buckets | grep "my-localstack-ephemeral-bucket"
           awslocal s3api list-buckets | grep "my-tf-test-bucket"
+          awslocal s3api list-buckets | grep "my-boto3-test-bucket"
