@@ -120,9 +120,19 @@ def post_message(table, username, message, room=ROOM):
 
 
 def get_cookie(event, name):
+    # Prefer the split "cookies" list Lambda Function URLs populate on real
+    # AWS, but fall back to parsing a raw Cookie request header - LocalStack
+    # doesn't reliably surface the split form.
     for cookie in event.get("cookies") or []:
         key, _, value = cookie.partition("=")
         if key.strip() == name:
+            return unquote(value)
+
+    headers = event.get("headers") or {}
+    raw_cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
+    for part in raw_cookie_header.split(";"):
+        key, _, value = part.strip().partition("=")
+        if key == name:
             return unquote(value)
     return None
 
@@ -220,6 +230,16 @@ PAGE_STYLE = """
   #compose { display: flex; gap: 0.5rem; padding: 0.75rem; border-top: 1px solid var(--border); }
   #compose input[type="text"] { flex: 1; }
   #chat-error { color: #fca5a5; font-size: 0.8rem; padding: 0 0.75rem 0.5rem; min-height: 1em; }
+  #chat-actions { padding: 0 0.75rem 0.75rem; text-align: center; }
+  #check-button {
+    display: inline-block;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.4rem 0.9rem;
+    font-size: 0.8rem;
+    text-decoration: none;
+  }
 """
 
 
@@ -229,6 +249,7 @@ def render_page(title, body_html, head_extra=""):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
 {head_extra}
 <title>{html.escape(title)}</title>
 <style>{PAGE_STYLE}</style>
@@ -284,6 +305,9 @@ def render_chat_page(username, messages, error=None):
     <input type="text" name="message" placeholder="Type a message" maxlength="{MAX_MESSAGE_LENGTH}" autocomplete="off" autofocus required>
     <button type="submit">Send</button>
   </form>
+  <div id="chat-actions">
+    <a id="check-button" href="/">Check for new messages</a>
+  </div>
 </main>
 """
     # Refreshing to /#bottom (rather than plain /) keeps the view scrolled to
@@ -305,22 +329,30 @@ def render_error_page():
 # -- responses ----------------------------------------------------------------
 
 
-def _html_response(body, status_code=200, cookie=None):
-    response = {
+def _html_response(body, status_code=200):
+    return {
         "statusCode": status_code,
-        "headers": {"Content-Type": "text/html; charset=utf-8"},
+        # Referrer-Policy: no-referrer stops the browser from sending a
+        # Referer header on the next navigation or form submission made from
+        # this page. Cloudflare's Bot Fight Mode on the shared
+        # trycloudflare.com Quick Tunnel zone appears to flag requests
+        # carrying one - a form-submission GET to /login from a real browser
+        # got blocked with a bare 403 even though curl making the exact same
+        # request (no Referer) succeeded on the same tunnel moments earlier.
+        "headers": {"Content-Type": "text/html; charset=utf-8", "Referrer-Policy": "no-referrer"},
         "body": body,
     }
-    if cookie:
-        response["cookies"] = [cookie]
-    return response
 
 
 def _redirect(location, cookie=None):
-    response = {"statusCode": 302, "headers": {"Location": location}, "body": ""}
+    headers = {"Location": location, "Referrer-Policy": "no-referrer"}
     if cookie:
-        response["cookies"] = [cookie]
-    return response
+        # A real Set-Cookie header, not the Lambda Function URL "cookies"
+        # response field - LocalStack doesn't reliably turn that into an
+        # actual Set-Cookie header on the wire, so a client's cookie jar
+        # never sees it and every "logged in" request looks unauthenticated.
+        headers["Set-Cookie"] = cookie
+    return {"statusCode": 302, "headers": headers, "body": ""}
 
 
 def _redirect_to_chat_with_error(message):

@@ -12,9 +12,10 @@ on:
       model:
         description: 'The LLM model to use for review'
         required: true
-        default: 'qwen2.5-coder:1.5b'
+        default: 'qwen2.5-coder:7b'
         type: choice
         options:
+          - 'qwen2.5-coder:7b'
           - 'qwen2.5-coder:1.5b'
           - 'deepseek-r1:1.5b'
 
@@ -30,7 +31,7 @@ jobs:
       pull-requests: write
       contents: read
     env:
-      MODEL: ${{ github.event.inputs.model || 'qwen2.5-coder:1.5b' }}
+      MODEL: ${{ github.event.inputs.model || 'qwen2.5-coder:7b' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7

@@ -105,7 +105,7 @@ jobs:
           echo "Function URL: $FUNCTION_URL"
           echo "Lambda host:  $LAMBDA_HOST"
 
-      - name: Sanity-check the function locally (Host header routing)
+      - name: Check the function locally (Host header routing)
         run: |
           set -euo pipefail
           curl -sf -H "Host: $LAMBDA_HOST" http://localhost:4566/ | tee /tmp/local-check.html
