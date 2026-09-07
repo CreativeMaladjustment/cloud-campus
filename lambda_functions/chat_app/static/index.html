@@ -110,13 +110,36 @@
     color: var(--muted);
     font-weight: 400;
   }
-  #logout-button {
+  .header-actions {
+    display: flex;
+    gap: 0.4rem;
+  }
+  #logout-button, #debug-toggle {
     background: transparent;
     color: var(--muted);
     border: 1px solid var(--border);
     padding: 0.4rem 0.7rem;
     font-weight: 500;
     font-size: 0.85rem;
+  }
+
+  #debug-log {
+    margin: 0;
+    padding: 0.6rem 0.9rem;
+    max-height: 160px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+    background: #020617;
+    color: #86efac;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.7rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  #debug-log:empty::before {
+    content: "No requests logged yet.";
+    color: var(--muted);
   }
 
   #messages {
@@ -188,7 +211,10 @@
 <main id="chat-screen" hidden>
   <div id="chat-header">
     <h1>Chat <span class="who" id="who-label"></span></h1>
-    <button id="logout-button" type="button">Log out</button>
+    <div class="header-actions">
+      <button id="debug-toggle" type="button">Show debug log</button>
+      <button id="logout-button" type="button">Log out</button>
+    </div>
   </div>
   <div id="messages"><div class="empty">No messages yet — say hello.</div></div>
   <div id="chat-error"></div>
@@ -196,6 +222,7 @@
     <input type="text" id="message-input" placeholder="Type a message" maxlength="500" autocomplete="off" required>
     <button type="submit">Send</button>
   </form>
+  <pre id="debug-log" hidden></pre>
 </main>
 
 <script>
@@ -203,7 +230,10 @@
   "use strict";
 
   const STORAGE_KEY = "chatUsername";
+  const DEBUG_STORAGE_KEY = "chatDebugMode";
   const POLL_INTERVAL_MS = 3000;
+  const MAX_DEBUG_ENTRIES = 200;
+  const MAX_DEBUG_BODY_LENGTH = 300;
 
   const loginScreen = document.getElementById("login-screen");
   const chatScreen = document.getElementById("chat-screen");
@@ -216,9 +246,55 @@
   const composeForm = document.getElementById("compose");
   const messageInput = document.getElementById("message-input");
   const chatError = document.getElementById("chat-error");
+  const debugToggle = document.getElementById("debug-toggle");
+  const debugLog = document.getElementById("debug-log");
 
   let username = null;
   let pollTimer = null;
+  let debugEntries = [];
+
+  // -- debug log: records every /api/messages request so failures can be
+  // diagnosed from the page itself, without needing browser devtools.
+
+  function truncate(text) {
+    if (!text) return "(empty body)";
+    return text.length > MAX_DEBUG_BODY_LENGTH
+      ? text.slice(0, MAX_DEBUG_BODY_LENGTH) + "…"
+      : text;
+  }
+
+  function logRequest(method, path, detail) {
+    const time = new Date().toISOString().slice(11, 23);
+    debugEntries.push(`[${time}] ${method} ${path} -> ${detail}`);
+    if (debugEntries.length > MAX_DEBUG_ENTRIES) debugEntries.shift();
+    debugLog.textContent = debugEntries.join("\n");
+    debugLog.scrollTop = debugLog.scrollHeight;
+  }
+
+  function isDebugEnabled() {
+    try {
+      if (new URLSearchParams(window.location.search).get("debug") === "1") return true;
+      return localStorage.getItem(DEBUG_STORAGE_KEY) === "1";
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function setDebugEnabled(enabled) {
+    debugLog.hidden = !enabled;
+    debugToggle.textContent = enabled ? "Hide debug log" : "Show debug log";
+    try {
+      localStorage.setItem(DEBUG_STORAGE_KEY, enabled ? "1" : "0");
+    } catch (err) {
+      // localStorage unavailable (private browsing, etc.) — toggle still works for this page view
+    }
+  }
+
+  debugToggle.addEventListener("click", function () {
+    setDebugEnabled(debugLog.hidden);
+  });
+
+  setDebugEnabled(isDebugEnabled());
 
   function showLogin() {
     chatScreen.hidden = true;
@@ -274,25 +350,57 @@
   }
 
   async function fetchMessages() {
+    let res;
     try {
-      const res = await fetch("/api/messages");
-      if (!res.ok) throw new Error("failed to load messages");
-      const data = await res.json();
-      renderMessages(data.messages || []);
+      res = await fetch("/api/messages");
     } catch (err) {
+      logRequest("GET", "/api/messages", `network error: ${err.message}`);
+      chatError.textContent = "Couldn't refresh messages. Retrying…";
+      return;
+    }
+
+    const bodyText = await res.text().catch(() => "");
+    logRequest("GET", "/api/messages", `HTTP ${res.status} ${truncate(bodyText)}`);
+
+    if (!res.ok) {
+      chatError.textContent = "Couldn't refresh messages. Retrying…";
+      return;
+    }
+
+    try {
+      const data = JSON.parse(bodyText);
+      renderMessages(data.messages || []);
+      chatError.textContent = "";
+    } catch (err) {
+      logRequest("GET", "/api/messages", `JSON parse error: ${err.message}`);
       chatError.textContent = "Couldn't refresh messages. Retrying…";
     }
   }
 
   async function sendMessage(text) {
-    const res = await fetch("/api/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: username, message: text }),
-    });
+    let res;
+    try {
+      res = await fetch("/api/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username, message: text }),
+      });
+    } catch (err) {
+      logRequest("POST", "/api/messages", `network error: ${err.message}`);
+      throw new Error("network error — see debug log");
+    }
+
+    const bodyText = await res.text().catch(() => "");
+    logRequest("POST", "/api/messages", `HTTP ${res.status} ${truncate(bodyText)}`);
+
     if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || "failed to send message");
+      let data = {};
+      try {
+        data = JSON.parse(bodyText);
+      } catch (err) {
+        // response body wasn't JSON — fall through to the generic status-based message below
+      }
+      throw new Error(data.error || `request failed with HTTP ${res.status}`);
     }
   }
 
