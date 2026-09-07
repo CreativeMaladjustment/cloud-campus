@@ -127,6 +127,16 @@ jobs:
           curl -sf -H "Host: $LAMBDA_HOST" http://localhost:4566/api/messages | tee /tmp/local-check.json
           grep -q '"messages"' /tmp/local-check.json
 
+          # POST is never exercised by the browser until someone actually sends a
+          # message, so check it here too rather than finding out from a live tunnel.
+          curl -sf -X POST -H "Host: $LAMBDA_HOST" -H "Content-Type: application/json" \
+            -d '{"username": "ci-check", "message": "hello from the sanity check"}' \
+            http://localhost:4566/api/messages | tee /tmp/local-check-post.json
+          grep -q '"username": "ci-check"' /tmp/local-check-post.json
+
+          curl -sf -H "Host: $LAMBDA_HOST" http://localhost:4566/api/messages | tee /tmp/local-check-after-post.json
+          grep -q "ci-check" /tmp/local-check-after-post.json
+
       - name: Install cloudflared
         run: |
           set -euo pipefail
@@ -197,6 +207,17 @@ jobs:
           echo "Tunnel URL: $TUNNEL_URL"
           for minute in $(seq 1 20); do
             echo "[$(date -u +%H:%M:%S)] Tunnel active — minute ${minute}/20. URL: $TUNNEL_URL"
+            # Print any chat-app Lambda invocation logs from the last minute so
+            # errors from real traffic (browser requests, not just the sanity
+            # check above) show up here even if this run gets cancelled before
+            # the 20 minutes are up.
+            set +e
+            awslocal logs filter-log-events \
+              --log-group-name /aws/lambda/chat-app \
+              --start-time "$(( ($(date +%s) - 65) * 1000 ))" \
+              --query 'events[].message' --output text 2>/dev/null | \
+              sed '/^$/d;s/^/  [chat-app] /'
+            set -e
             sleep 60
           done
           echo "20-minute hold complete."
