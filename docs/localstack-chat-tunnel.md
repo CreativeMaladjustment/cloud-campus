@@ -50,7 +50,7 @@ LocalStack injects `LOCALSTACK_HOSTNAME` (and usually `EDGE_PORT`) into the Lamb
 
 1. **Starts LocalStack** and waits for both the `lambda` and `dynamodb` services to report healthy.
 2. **Creates the `chat-messages` DynamoDB table** with the `room` / `sort_key` composite key described above.
-3. **Packages and deploys the `chat-app` Lambda** from `lambda_functions/chat_app/` (`handler.py` plus the `static/` directory), with `TABLE_NAME=chat-messages` set as an environment variable, and creates a public Function URL (`auth-type NONE`, with the matching `lambda:InvokeFunctionUrl` resource policy).
+3. **Packages and deploys the `chat-app` Lambda** from `lambda_functions/chat_app/` (`handler.py` plus the `static/` directory), with `TABLE_NAME=chat-messages` set as an environment variable and an explicit 30-second timeout / 256 MB memory (see [Troubleshooting](#troubleshooting) below for why the Lambda default of 3 seconds isn't enough here), and creates a public Function URL (`auth-type NONE`, with the matching `lambda:InvokeFunctionUrl` resource policy).
 4. **Sanity-checks it locally** — curls the function directly on the runner with the Function URL's own `Host` header, checking both the HTML page and the (empty) messages API, before troubleshooting would require going through the tunnel.
 5. **Starts a Cloudflare Quick Tunnel** pointed at `http://localhost:4566` with `--http-host-header` set to the Lambda's Function URL host (see [why this flag is required](localstack-tunnel.md#why---http-host-header-is-required) — the same reasoning applies here), and prints the assigned `https://*.trycloudflare.com` URL to the job's step summary and console.
 6. **Holds the tunnel open for 20 minutes** so there's time to open the link and actually chat, logging progress once a minute.
@@ -62,6 +62,22 @@ LocalStack injects `LOCALSTACK_HOSTNAME` (and usually `EDGE_PORT`) into the Lamb
 2. Approve the `localstack` environment deployment if prompted.
 3. Once the job reaches the "Publish tunnel URL" step, the public URL is printed in the step summary and the console logs — open it in a browser, enter a display name, and start chatting. Share the same URL with anyone else you want in the conversation.
 4. The tunnel and LocalStack are automatically torn down after the 20-minute hold, whether the run succeeded or failed — chat history is not preserved between runs.
+
+## Troubleshooting
+
+**The page loads, but the chat shows "Couldn't refresh messages. Retrying…" and sending a message flashes "failed to send message".**
+
+This means the `chat-app` Lambda is reachable (the static page loaded fine) but is erroring on every call to `/api/messages`, for both `GET` and `POST`. The `handler.py` router only touches DynamoDB on the `/api/messages` routes — `GET /` never does — so this points at the Lambda failing (or timing out) partway through a DynamoDB call rather than a routing or tunnel problem.
+
+The most common cause: **the Lambda invocation is too slow for its configured timeout.** LocalStack's Docker-based Lambda executor commonly cold-starts a fresh container on every invocation, and a cold Python 3.11 start plus a cross-container round trip to DynamoDB through LocalStack's gateway can easily take longer than the AWS default 3-second Lambda timeout — especially once real, repeated browser polling (rather than a single one-off `curl`) starts hitting it. A timeout comes back from the Function URL as `{"errorMessage": ..., "errorType": "..."}` (HTTP 502) rather than the app's own `{"error": "..."}` shape, which is exactly what produces the frontend's generic fallback text. The workflow deploys the Lambda with `--timeout 30 --memory-size 256` for this reason — if you've customized the deploy step and dropped those flags, add them back.
+
+If messages still fail after that, check the actual error instead of guessing further:
+
+```bash
+awslocal logs tail /aws/lambda/chat-app --since 10m
+```
+
+`handler.py` catches any unexpected exception on the `/api/messages` routes and returns it as `{"error": "..."}` with a `500` status (rather than letting Lambda's raw error envelope leak through), and logs the real exception via `print()` so it shows up in the command above.
 
 ## Tests
 

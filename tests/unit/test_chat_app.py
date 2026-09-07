@@ -201,3 +201,16 @@ def test_lambda_handler_unknown_api_path_returns_404():
 def test_lambda_handler_post_to_root_returns_405():
     response = lambda_handler(_http_event("POST", "/"), None)
     assert response["statusCode"] == 405
+
+
+def test_lambda_handler_unexpected_error_returns_500_json(monkeypatch):
+    def boom():
+        raise RuntimeError("dynamodb is unreachable")
+
+    monkeypatch.setattr("lambda_functions.chat_app.handler.get_table", boom)
+
+    response = lambda_handler(_http_event("GET", "/api/messages"), None)
+
+    assert response["statusCode"] == 500
+    body = json.loads(response["body"])
+    assert "error" in body

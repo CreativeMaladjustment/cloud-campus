@@ -88,6 +88,8 @@ jobs:
             --handler handler.lambda_handler \
             --zip-file fileb://function.zip \
             --role arn:aws:iam::000000000000:role/lambda-role \
+            --timeout 30 \
+            --memory-size 256 \
             --environment "Variables={TABLE_NAME=chat-messages}"
           awslocal lambda wait function-active --function-name chat-app
           echo "Lambda function 'chat-app' is active."
