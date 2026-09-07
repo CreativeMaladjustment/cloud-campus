@@ -10,6 +10,7 @@ jobs:
   tunnel:
     name: Deploy Lambda on LocalStack and expose it via Cloudflare Quick Tunnel
     runs-on: ubuntu-latest
+    environment: localstack
     timeout-minutes: 20
     steps:
       - name: Checkout code
@@ -21,6 +22,8 @@ jobs:
           python-version: '3.x'
 
       - name: Start LocalStack
+        env:
+          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_CI_TOKEN }}
         run: |
           set -euo pipefail
           docker run -d \
@@ -28,6 +31,8 @@ jobs:
             -p 4566:4566 \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -e DOCKER_HOST=unix:///var/run/docker.sock \
+            -e LOCALSTACK_AUTH_TOKEN="$LOCALSTACK_AUTH_TOKEN" \
+            -e LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT=1 \
             -e DEBUG=1 \
             localstack/localstack:latest
 
