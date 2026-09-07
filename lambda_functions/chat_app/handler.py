@@ -120,9 +120,19 @@ def post_message(table, username, message, room=ROOM):
 
 
 def get_cookie(event, name):
+    # Prefer the split "cookies" list Lambda Function URLs populate on real
+    # AWS, but fall back to parsing a raw Cookie request header - LocalStack
+    # doesn't reliably surface the split form.
     for cookie in event.get("cookies") or []:
         key, _, value = cookie.partition("=")
         if key.strip() == name:
+            return unquote(value)
+
+    headers = event.get("headers") or {}
+    raw_cookie_header = headers.get("cookie") or headers.get("Cookie") or ""
+    for part in raw_cookie_header.split(";"):
+        key, _, value = part.strip().partition("=")
+        if key == name:
             return unquote(value)
     return None
 
@@ -305,22 +315,23 @@ def render_error_page():
 # -- responses ----------------------------------------------------------------
 
 
-def _html_response(body, status_code=200, cookie=None):
-    response = {
+def _html_response(body, status_code=200):
+    return {
         "statusCode": status_code,
         "headers": {"Content-Type": "text/html; charset=utf-8"},
         "body": body,
     }
-    if cookie:
-        response["cookies"] = [cookie]
-    return response
 
 
 def _redirect(location, cookie=None):
-    response = {"statusCode": 302, "headers": {"Location": location}, "body": ""}
+    headers = {"Location": location}
     if cookie:
-        response["cookies"] = [cookie]
-    return response
+        # A real Set-Cookie header, not the Lambda Function URL "cookies"
+        # response field - LocalStack doesn't reliably turn that into an
+        # actual Set-Cookie header on the wire, so a client's cookie jar
+        # never sees it and every "logged in" request looks unauthenticated.
+        headers["Set-Cookie"] = cookie
+    return {"statusCode": 302, "headers": headers, "body": ""}
 
 
 def _redirect_to_chat_with_error(message):

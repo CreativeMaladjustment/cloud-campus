@@ -144,7 +144,7 @@ def test_root_without_cookie_shows_login_page():
 
     assert response["statusCode"] == 200
     assert "Join the chat" in response["body"]
-    assert "cookies" not in response
+    assert "Set-Cookie" not in response["headers"]
 
 
 def test_root_with_cookie_shows_chat_page(monkeypatch):
@@ -179,6 +179,25 @@ def test_root_shows_error_query_param():
     assert "message is required" in response["body"]
 
 
+def test_root_reads_cookie_from_raw_cookie_header(monkeypatch):
+    # LocalStack doesn't reliably populate the split "cookies" list Lambda
+    # Function URLs provide on real AWS, so get_cookie() must also handle a
+    # plain "Cookie" request header (as curl's cookie jar sends).
+    mock_table = MagicMock()
+    mock_table.query.return_value = {"Items": []}
+    monkeypatch.setattr("lambda_functions.chat_app.handler.get_table", lambda: mock_table)
+
+    event = {
+        "requestContext": {"http": {"method": "GET", "path": "/"}},
+        "queryStringParameters": None,
+        "headers": {"cookie": f"other=1; {COOKIE_NAME}=alice; another=2"},
+    }
+    response = lambda_handler(event, None)
+
+    assert response["statusCode"] == 200
+    assert "— alice" in response["body"]
+
+
 # -- lambda_handler: GET /login ----------------------------------------------
 
 
@@ -187,12 +206,12 @@ def test_login_sets_cookie_and_redirects():
 
     assert response["statusCode"] == 302
     assert response["headers"]["Location"] == "/#bottom"
-    assert response["cookies"] == [f"{COOKIE_NAME}=alice; Path=/; Max-Age=86400; SameSite=Lax"]
+    assert response["headers"]["Set-Cookie"] == f"{COOKIE_NAME}=alice; Path=/; Max-Age=86400; SameSite=Lax"
 
 
 def test_login_url_encodes_username_with_special_characters():
     response = lambda_handler(_event("GET", "/login", query={"username": "a b"}), None)
-    cookie_value = response["cookies"][0].split(";")[0]
+    cookie_value = response["headers"]["Set-Cookie"].split(";")[0]
     assert unquote(cookie_value.split("=", 1)[1]) == "a b"
 
 
@@ -200,7 +219,7 @@ def test_login_rejects_missing_username():
     response = lambda_handler(_event("GET", "/login", query={}), None)
 
     assert response["statusCode"] == 400
-    assert "cookies" not in response
+    assert "Set-Cookie" not in response["headers"]
     assert "username is required" in response["body"]
 
 
@@ -249,7 +268,7 @@ def test_logout_clears_cookie_and_redirects():
 
     assert response["statusCode"] == 302
     assert response["headers"]["Location"] == "/"
-    assert response["cookies"] == [f"{COOKIE_NAME}=; Path=/; Max-Age=0; SameSite=Lax"]
+    assert response["headers"]["Set-Cookie"] == f"{COOKIE_NAME}=; Path=/; Max-Age=0; SameSite=Lax"
 
 
 # -- lambda_handler: misc -----------------------------------------------------
