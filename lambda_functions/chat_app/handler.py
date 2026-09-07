@@ -230,6 +230,16 @@ PAGE_STYLE = """
   #compose { display: flex; gap: 0.5rem; padding: 0.75rem; border-top: 1px solid var(--border); }
   #compose input[type="text"] { flex: 1; }
   #chat-error { color: #fca5a5; font-size: 0.8rem; padding: 0 0.75rem 0.5rem; min-height: 1em; }
+  #chat-actions { padding: 0 0.75rem 0.75rem; text-align: center; }
+  #check-button {
+    display: inline-block;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.4rem 0.9rem;
+    font-size: 0.8rem;
+    text-decoration: none;
+  }
 """
 
 
@@ -295,6 +305,9 @@ def render_chat_page(username, messages, error=None):
     <input type="text" name="message" placeholder="Type a message" maxlength="{MAX_MESSAGE_LENGTH}" autocomplete="off" autofocus required>
     <button type="submit">Send</button>
   </form>
+  <div id="chat-actions">
+    <a id="check-button" href="/">Check for new messages</a>
+  </div>
 </main>
 """
     # Refreshing to /#bottom (rather than plain /) keeps the view scrolled to

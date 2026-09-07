@@ -175,6 +175,7 @@ def test_root_with_cookie_shows_chat_page(monkeypatch):
     assert response["statusCode"] == 200
     assert "hi there" in response["body"]
     assert "— alice" in response["body"]
+    assert '<a id="check-button" href="/">Check for new messages</a>' in response["body"]
 
 
 def test_root_escapes_message_content_to_prevent_xss(monkeypatch):
