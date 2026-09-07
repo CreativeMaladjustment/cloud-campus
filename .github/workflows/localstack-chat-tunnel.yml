@@ -77,7 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           cd lambda_functions/chat_app
-          zip -r ../../function.zip handler.py static
+          zip ../../function.zip handler.py
 
       - name: Deploy chat-app Lambda function
         run: |
@@ -121,21 +121,27 @@ jobs:
       - name: Sanity-check the app locally (Host header routing)
         run: |
           set -euo pipefail
-          curl -sf -H "Host: $LAMBDA_HOST" http://localhost:4566/ | tee /tmp/local-check.html
-          grep -q "LocalStack Chat" /tmp/local-check.html
+          COOKIES=$(mktemp)
 
-          curl -sf -H "Host: $LAMBDA_HOST" http://localhost:4566/api/messages | tee /tmp/local-check.json
-          grep -q '"messages"' /tmp/local-check.json
+          curl -sf -H "Host: $LAMBDA_HOST" http://localhost:4566/ | tee /tmp/local-check-login.html
+          grep -q "Join the chat" /tmp/local-check-login.html
 
-          # POST is never exercised by the browser until someone actually sends a
-          # message, so check it here too rather than finding out from a live tunnel.
-          curl -sf -X POST -H "Host: $LAMBDA_HOST" -H "Content-Type: application/json" \
-            -d '{"username": "ci-check", "message": "hello from the sanity check"}' \
-            http://localhost:4566/api/messages | tee /tmp/local-check-post.json
-          grep -q '"username": "ci-check"' /tmp/local-check-post.json
+          LOGIN_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIES" \
+            -H "Host: $LAMBDA_HOST" "http://localhost:4566/login?username=ci-check")
+          [ "$LOGIN_STATUS" = "302" ] || { echo "::error::expected 302 from /login, got $LOGIN_STATUS"; exit 1; }
 
-          curl -sf -H "Host: $LAMBDA_HOST" http://localhost:4566/api/messages | tee /tmp/local-check-after-post.json
-          grep -q "ci-check" /tmp/local-check-after-post.json
+          curl -sf -b "$COOKIES" -H "Host: $LAMBDA_HOST" http://localhost:4566/ | tee /tmp/local-check-chat.html
+          grep -q "ci-check" /tmp/local-check-chat.html
+
+          # GET is used for /send (not the usual verb for a mutating action) because it's
+          # the one request shape proven to survive the tunnel — see "Why every action
+          # here is a plain GET request" in docs/localstack-chat-tunnel.md for why.
+          SEND_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIES" \
+            -H "Host: $LAMBDA_HOST" "http://localhost:4566/send?message=hello+from+the+sanity+check")
+          [ "$SEND_STATUS" = "302" ] || { echo "::error::expected 302 from /send, got $SEND_STATUS"; exit 1; }
+
+          curl -sf -b "$COOKIES" -H "Host: $LAMBDA_HOST" http://localhost:4566/ | tee /tmp/local-check-after-send.html
+          grep -q "hello from the sanity check" /tmp/local-check-after-send.html
 
       - name: Install cloudflared
         run: |
