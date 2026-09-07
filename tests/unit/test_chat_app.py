@@ -3,13 +3,14 @@
 These tests mock the DynamoDB table entirely, so they don't need a running
 LocalStack instance and are safe to run on every PR.
 """
-import json
 from unittest.mock import MagicMock
+from urllib.parse import unquote
 
 import boto3
 import pytest
 
 from lambda_functions.chat_app.handler import (
+    COOKIE_NAME,
     DEFAULT_TABLE_NAME,
     ValidationError,
     get_endpoint_url,
@@ -22,11 +23,18 @@ from lambda_functions.chat_app.handler import (
 )
 
 
-def _http_event(method, path, body=None):
-    event = {"requestContext": {"http": {"method": method, "path": path}}}
-    if body is not None:
-        event["body"] = json.dumps(body)
+def _event(method, path, query=None, cookies=None):
+    event = {
+        "requestContext": {"http": {"method": method, "path": path}},
+        "queryStringParameters": query,
+    }
+    if cookies:
+        event["cookies"] = cookies
     return event
+
+
+def _login_cookie(username):
+    return f"{COOKIE_NAME}={username}"
 
 
 # -- validation ---------------------------------------------------------
@@ -126,91 +134,144 @@ def test_post_message_writes_expected_item():
     assert item["username"] == "alice"
     assert item["message"] == "hello there"
     assert "sort_key" in item and "created_at" in item
-    assert result == {
-        "username": "alice",
-        "message": "hello there",
-        "created_at": item["created_at"],
+
+
+# -- lambda_handler: GET / --------------------------------------------------
+
+
+def test_root_without_cookie_shows_login_page():
+    response = lambda_handler(_event("GET", "/"), None)
+
+    assert response["statusCode"] == 200
+    assert "Join the chat" in response["body"]
+    assert "cookies" not in response
+
+
+def test_root_with_cookie_shows_chat_page(monkeypatch):
+    mock_table = MagicMock()
+    mock_table.query.return_value = {
+        "Items": [{"username": "alice", "message": "hi there", "created_at": "t1"}]
     }
+    monkeypatch.setattr("lambda_functions.chat_app.handler.get_table", lambda: mock_table)
 
-
-# -- lambda_handler -------------------------------------------------------
-
-
-def test_lambda_handler_get_root_serves_html(monkeypatch):
-    response = lambda_handler(_http_event("GET", "/"), None)
+    response = lambda_handler(_event("GET", "/", cookies=[_login_cookie("alice")]), None)
 
     assert response["statusCode"] == 200
-    assert response["headers"]["Content-Type"].startswith("text/html")
-    assert "<html" in response["body"]
+    assert "hi there" in response["body"]
+    assert "— alice" in response["body"]
 
 
-def test_lambda_handler_get_messages_returns_json(monkeypatch):
+def test_root_escapes_message_content_to_prevent_xss(monkeypatch):
     mock_table = MagicMock()
-    mock_table.query.return_value = {"Items": []}
+    mock_table.query.return_value = {
+        "Items": [{"username": "<script>alert(1)</script>", "message": "<b>hi</b>", "created_at": "t1"}]
+    }
     monkeypatch.setattr("lambda_functions.chat_app.handler.get_table", lambda: mock_table)
 
-    response = lambda_handler(_http_event("GET", "/api/messages"), None)
+    response = lambda_handler(_event("GET", "/", cookies=[_login_cookie("alice")]), None)
 
-    assert response["statusCode"] == 200
-    assert json.loads(response["body"]) == {"messages": []}
-
-
-def test_lambda_handler_post_messages_creates_message(monkeypatch):
-    mock_table = MagicMock()
-    monkeypatch.setattr("lambda_functions.chat_app.handler.get_table", lambda: mock_table)
-
-    event = _http_event("POST", "/api/messages", {"username": "alice", "message": "hi"})
-    response = lambda_handler(event, None)
-
-    assert response["statusCode"] == 201
-    mock_table.put_item.assert_called_once()
-    body = json.loads(response["body"])
-    assert body["message"]["username"] == "alice"
-    assert body["message"]["message"] == "hi"
+    assert "<script>alert(1)</script>" not in response["body"]
+    assert "&lt;script&gt;" in response["body"]
 
 
-def test_lambda_handler_post_messages_rejects_missing_username(monkeypatch):
-    mock_table = MagicMock()
-    monkeypatch.setattr("lambda_functions.chat_app.handler.get_table", lambda: mock_table)
+def test_root_shows_error_query_param():
+    response = lambda_handler(_event("GET", "/", query={"error": "message is required"}), None)
+    assert "message is required" in response["body"]
 
-    event = _http_event("POST", "/api/messages", {"message": "hi"})
-    response = lambda_handler(event, None)
+
+# -- lambda_handler: GET /login ----------------------------------------------
+
+
+def test_login_sets_cookie_and_redirects():
+    response = lambda_handler(_event("GET", "/login", query={"username": "alice"}), None)
+
+    assert response["statusCode"] == 302
+    assert response["headers"]["Location"] == "/#bottom"
+    assert response["cookies"] == [f"{COOKIE_NAME}=alice; Path=/; Max-Age=86400; SameSite=Lax"]
+
+
+def test_login_url_encodes_username_with_special_characters():
+    response = lambda_handler(_event("GET", "/login", query={"username": "a b"}), None)
+    cookie_value = response["cookies"][0].split(";")[0]
+    assert unquote(cookie_value.split("=", 1)[1]) == "a b"
+
+
+def test_login_rejects_missing_username():
+    response = lambda_handler(_event("GET", "/login", query={}), None)
 
     assert response["statusCode"] == 400
+    assert "cookies" not in response
+    assert "username is required" in response["body"]
+
+
+# -- lambda_handler: GET /send -----------------------------------------------
+
+
+def test_send_without_cookie_redirects_to_login():
+    response = lambda_handler(_event("GET", "/send", query={"message": "hi"}), None)
+
+    assert response["statusCode"] == 302
+    assert response["headers"]["Location"] == "/"
+
+
+def test_send_creates_message_and_redirects(monkeypatch):
+    mock_table = MagicMock()
+    monkeypatch.setattr("lambda_functions.chat_app.handler.get_table", lambda: mock_table)
+
+    event = _event("GET", "/send", query={"message": "hi"}, cookies=[_login_cookie("alice")])
+    response = lambda_handler(event, None)
+
+    assert response["statusCode"] == 302
+    assert response["headers"]["Location"] == "/#bottom"
+    mock_table.put_item.assert_called_once()
+    item = mock_table.put_item.call_args.kwargs["Item"]
+    assert item["username"] == "alice"
+    assert item["message"] == "hi"
+
+
+def test_send_rejects_empty_message(monkeypatch):
+    mock_table = MagicMock()
+    monkeypatch.setattr("lambda_functions.chat_app.handler.get_table", lambda: mock_table)
+
+    event = _event("GET", "/send", query={"message": "  "}, cookies=[_login_cookie("alice")])
+    response = lambda_handler(event, None)
+
+    assert response["statusCode"] == 302
+    assert response["headers"]["Location"].startswith("/?error=")
     mock_table.put_item.assert_not_called()
 
 
-def test_lambda_handler_post_messages_rejects_invalid_json(monkeypatch):
-    mock_table = MagicMock()
-    monkeypatch.setattr("lambda_functions.chat_app.handler.get_table", lambda: mock_table)
-
-    event = {
-        "requestContext": {"http": {"method": "POST", "path": "/api/messages"}},
-        "body": "not json",
-    }
-    response = lambda_handler(event, None)
-
-    assert response["statusCode"] == 400
+# -- lambda_handler: GET /logout ---------------------------------------------
 
 
-def test_lambda_handler_unknown_api_path_returns_404():
-    response = lambda_handler(_http_event("GET", "/api/nope"), None)
+def test_logout_clears_cookie_and_redirects():
+    response = lambda_handler(_event("GET", "/logout", cookies=[_login_cookie("alice")]), None)
+
+    assert response["statusCode"] == 302
+    assert response["headers"]["Location"] == "/"
+    assert response["cookies"] == [f"{COOKIE_NAME}=; Path=/; Max-Age=0; SameSite=Lax"]
+
+
+# -- lambda_handler: misc -----------------------------------------------------
+
+
+def test_unknown_path_returns_404():
+    response = lambda_handler(_event("GET", "/nope"), None)
     assert response["statusCode"] == 404
 
 
-def test_lambda_handler_post_to_root_returns_405():
-    response = lambda_handler(_http_event("POST", "/"), None)
+def test_non_get_method_returns_405():
+    response = lambda_handler(_event("POST", "/"), None)
     assert response["statusCode"] == 405
 
 
-def test_lambda_handler_unexpected_error_returns_500_json(monkeypatch):
+def test_unexpected_error_returns_error_page(monkeypatch):
     def boom():
         raise RuntimeError("dynamodb is unreachable")
 
     monkeypatch.setattr("lambda_functions.chat_app.handler.get_table", boom)
 
-    response = lambda_handler(_http_event("GET", "/api/messages"), None)
+    response = lambda_handler(_event("GET", "/", cookies=[_login_cookie("alice")]), None)
 
     assert response["statusCode"] == 500
-    body = json.loads(response["body"])
-    assert "error" in body
+    assert "Something went wrong" in response["body"]
