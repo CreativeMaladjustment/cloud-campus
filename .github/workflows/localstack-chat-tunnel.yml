@@ -222,6 +222,29 @@ jobs:
           done
           echo "20-minute hold complete."
 
+      - name: Save chat-app and LocalStack logs
+        # if: always() so this still runs whether the run finished the full
+        # 20-minute hold, failed, or was cancelled — it must run before the
+        # "Tear down" step below removes the container these logs live in.
+        if: always()
+        run: |
+          set +e
+          mkdir -p logs
+          awslocal logs filter-log-events \
+            --log-group-name /aws/lambda/chat-app \
+            --output json > logs/chat-app-lambda.json 2>logs/chat-app-lambda.err
+          docker logs localstack > logs/localstack-container.log 2>&1
+          echo "Saved $(jq '.events | length' logs/chat-app-lambda.json 2>/dev/null || echo '0') chat-app log event(s) and $(wc -l < logs/localstack-container.log 2>/dev/null || echo 0) LocalStack container log line(s)."
+
+      - name: Upload logs artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: chat-tunnel-logs
+          path: logs/
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Tear down tunnel and LocalStack
         if: always()
         run: |
