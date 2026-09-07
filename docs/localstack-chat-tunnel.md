@@ -42,6 +42,8 @@ That matches a well-documented, known-non-negotiable behavior: **Cloudflare's Bo
 
 The fix wasn't a Lambda or LocalStack config change (there wasn't one that could reach the actual cause) — it was rearchitecting the app so every interaction is a GET-driven page load or HTML form submission instead of a `fetch()` call, which is what `handler.py` and the routes above now do. `/login` and `/send` are GET requests rather than POST specifically because GET is the one request shape proven to get through; a same-origin POST form submission may still carry `Origin` under the same browser behavior that causes `fetch()` to.
 
+Going GET-only wasn't quite the whole story, though: a real browser submitting the `/login` form still got blocked with the same bare Cloudflare error page, even though the *identical* request (`GET /login?username=...`) made with `curl` on the same tunnel, moments earlier, succeeded — the CI sanity check's own `/login` call had already gone through cleanly. The difference is `Referer`: a browser attaches it to a form-submission navigation (pointing back at the page the form was on), while `curl` never sends one unless told to, and Bot Fight Mode appears to flag that too. Every response now sends `Referrer-Policy: no-referrer` (as both an HTTP header and a `<meta name="referrer">` tag, for the widest client support), which stops the browser from attaching `Referer` to any request made from our own pages.
+
 ### DynamoDB table
 
 `chat-messages` uses a composite key so all messages for a room can be queried in order without a table scan:

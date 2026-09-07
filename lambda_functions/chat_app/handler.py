@@ -239,6 +239,7 @@ def render_page(title, body_html, head_extra=""):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
 {head_extra}
 <title>{html.escape(title)}</title>
 <style>{PAGE_STYLE}</style>
@@ -318,13 +319,20 @@ def render_error_page():
 def _html_response(body, status_code=200):
     return {
         "statusCode": status_code,
-        "headers": {"Content-Type": "text/html; charset=utf-8"},
+        # Referrer-Policy: no-referrer stops the browser from sending a
+        # Referer header on the next navigation or form submission made from
+        # this page. Cloudflare's Bot Fight Mode on the shared
+        # trycloudflare.com Quick Tunnel zone appears to flag requests
+        # carrying one - a form-submission GET to /login from a real browser
+        # got blocked with a bare 403 even though curl making the exact same
+        # request (no Referer) succeeded on the same tunnel moments earlier.
+        "headers": {"Content-Type": "text/html; charset=utf-8", "Referrer-Policy": "no-referrer"},
         "body": body,
     }
 
 
 def _redirect(location, cookie=None):
-    headers = {"Location": location}
+    headers = {"Location": location, "Referrer-Policy": "no-referrer"}
     if cookie:
         # A real Set-Cookie header, not the Lambda Function URL "cookies"
         # response field - LocalStack doesn't reliably turn that into an

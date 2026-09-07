@@ -147,6 +147,22 @@ def test_root_without_cookie_shows_login_page():
     assert "Set-Cookie" not in response["headers"]
 
 
+def test_html_responses_set_no_referrer_policy():
+    # Cloudflare's Bot Fight Mode on the shared trycloudflare.com Quick
+    # Tunnel zone blocks a browser's Referer-carrying form-submission GET
+    # to /login even though the identical request without Referer (e.g.
+    # plain curl) succeeds - suppressing Referer on outgoing requests from
+    # our own pages avoids tripping it.
+    response = lambda_handler(_event("GET", "/"), None)
+    assert response["headers"]["Referrer-Policy"] == "no-referrer"
+    assert '<meta name="referrer" content="no-referrer">' in response["body"]
+
+
+def test_redirects_set_no_referrer_policy():
+    response = lambda_handler(_event("GET", "/login", query={"username": "alice"}), None)
+    assert response["headers"]["Referrer-Policy"] == "no-referrer"
+
+
 def test_root_with_cookie_shows_chat_page(monkeypatch):
     mock_table = MagicMock()
     mock_table.query.return_value = {
