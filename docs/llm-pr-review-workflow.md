@@ -6,7 +6,7 @@ This repository includes a GitHub Actions workflow that automatically reviews Pu
 
 The workflow runs entirely on the GitHub Actions runner, without requiring external API keys or incurring costs for LLM usage.
 
-1. **Setup:** It runs an Ollama Docker service container and pulls the lightweight `qwen2.5-coder:1.5b and deepseek-r1:1.5b` model.
+1. **Setup:** It runs an Ollama Docker service container and pulls `qwen2.5-coder:7b` (the default; `qwen2.5-coder:1.5b` and `deepseek-r1:1.5b` are also available via manual dispatch). The 1.5B models are fast but too small to give reliable, non-hallucinated feedback on real diffs; 7B is a meaningfully better floor while still running CPU-only on a standard GitHub-hosted runner, at the cost of a slower pull and generation step.
 2. **Fetch Data:** It uses the GitHub CLI (`gh`) to fetch the PR title, description, and the complete code diff.
 3. **Review:** It dynamically generates a prompt for the LLM to review the PR for clarity, completeness, and documentation accuracy based on the code changes.
 4. **Comment:** It posts the generated review as a comment directly on the Pull Request.
