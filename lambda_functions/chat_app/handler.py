@@ -136,21 +136,24 @@ def lambda_handler(event, context):
     method = http.get("method", "GET")
     path = http.get("path") or "/"
 
-    try:
-        if path == "/api/messages" and method == "GET":
-            return _json_response(200, {"messages": list_messages(get_table())})
-
-        if path == "/api/messages" and method == "POST":
-            body = _parse_json_body(event)
-            username = validate_username(body.get("username"))
-            message = validate_message(body.get("message"))
-            created = post_message(get_table(), username, message)
-            return _json_response(201, {"message": created})
-    except ValidationError as exc:
-        return _json_response(400, {"error": str(exc)})
-
     if path.startswith("/api/"):
-        return _json_response(404, {"error": "not found"})
+        try:
+            if path == "/api/messages" and method == "GET":
+                return _json_response(200, {"messages": list_messages(get_table())})
+
+            if path == "/api/messages" and method == "POST":
+                body = _parse_json_body(event)
+                username = validate_username(body.get("username"))
+                message = validate_message(body.get("message"))
+                created = post_message(get_table(), username, message)
+                return _json_response(201, {"message": created})
+
+            return _json_response(404, {"error": "not found"})
+        except ValidationError as exc:
+            return _json_response(400, {"error": str(exc)})
+        except Exception as exc:  # surface a JSON error instead of the raw Lambda error envelope
+            print(f"Unhandled error in {method} {path}: {exc!r}")
+            return _json_response(500, {"error": "internal error, check the chat-app Lambda logs"})
 
     if method == "GET":
         return _html_response(_INDEX_HTML)
