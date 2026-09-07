@@ -118,7 +118,7 @@ jobs:
           echo "Function URL: $FUNCTION_URL"
           echo "Lambda host:  $LAMBDA_HOST"
 
-      - name: Sanity-check the app locally (Host header routing)
+      - name: Check the app locally (Host header routing)
         run: |
           set -euo pipefail
           COOKIES=$(mktemp)
@@ -127,21 +127,21 @@ jobs:
           grep -q "Join the chat" /tmp/local-check-login.html
 
           LOGIN_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIES" \
-            -H "Host: $LAMBDA_HOST" "http://localhost:4566/login?username=ci-check")
+            -H "Host: $LAMBDA_HOST" "http://localhost:4566/login?username=hello-world")
           [ "$LOGIN_STATUS" = "302" ] || { echo "::error::expected 302 from /login, got $LOGIN_STATUS"; exit 1; }
 
           curl -sf -b "$COOKIES" -H "Host: $LAMBDA_HOST" http://localhost:4566/ | tee /tmp/local-check-chat.html
-          grep -q "ci-check" /tmp/local-check-chat.html
+          grep -q "hello-world" /tmp/local-check-chat.html
 
           # GET is used for /send (not the usual verb for a mutating action) because it's
           # the one request shape proven to survive the tunnel — see "Why every action
           # here is a plain GET request" in docs/localstack-chat-tunnel.md for why.
           SEND_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIES" \
-            -H "Host: $LAMBDA_HOST" "http://localhost:4566/send?message=hello+from+the+sanity+check")
+            -H "Host: $LAMBDA_HOST" "http://localhost:4566/send?message=hello+world")
           [ "$SEND_STATUS" = "302" ] || { echo "::error::expected 302 from /send, got $SEND_STATUS"; exit 1; }
 
           curl -sf -b "$COOKIES" -H "Host: $LAMBDA_HOST" http://localhost:4566/ | tee /tmp/local-check-after-send.html
-          grep -q "hello from the sanity check" /tmp/local-check-after-send.html
+          grep -q "hello world" /tmp/local-check-after-send.html
 
       - name: Install cloudflared
         run: |
@@ -214,9 +214,9 @@ jobs:
           for minute in $(seq 1 20); do
             echo "[$(date -u +%H:%M:%S)] Tunnel active — minute ${minute}/20. URL: $TUNNEL_URL"
             # Print any chat-app Lambda invocation logs from the last minute so
-            # errors from real traffic (browser requests, not just the sanity
-            # check above) show up here even if this run gets cancelled before
-            # the 20 minutes are up.
+            # errors from real traffic (browser requests, not just the check
+            # above) show up here even if this run gets cancelled before the
+            # 20 minutes are up.
             set +e
             awslocal logs filter-log-events \
               --log-group-name /aws/lambda/chat-app \
